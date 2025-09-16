@@ -9,10 +9,10 @@ import json  # ler/gravar JSON
 import io   # buffer PNG 
 import qrcode  # gerar QR code 
 import os
-from fastapi import Header
+from fastapi import Header, Request
 
-API_KEY = os.getenv("API_KEY", "")           # valor vem do Render
-API_KEY_HEADER = "X-API-KEY"                 # nome do header esperado
+API_KEY = os.getenv("API_KEY", "")
+API_KEY_HEADER = "X-API-KEY"
 
 app = FastAPI(title="AAS + DPP + View", version="0.3.0")  # app FastAPI 
 
@@ -112,19 +112,6 @@ def update_submodel(
     data.setdefault("submodels", {})
     data["submodels"][name] = body
     save_aas(data)
-
-    # log simples
-    log_line = {
-        "ts": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-        "ip": request.client.host if request and request.client else None,
-        "id": id,
-        "submodel": name,
-    }
-    (HERE / "changes.log").write_text(
-        ((HERE / "changes.log").read_text(encoding="utf-8") if (HERE / "changes.log").exists() else "") +
-        json.dumps(log_line, ensure_ascii=False) + "\n",
-        encoding="utf-8"
-    )
 
     return {"status": "ok", "updatedSubmodel": name}
 
