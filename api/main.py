@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional  # tipos auxiliares [4]
 import json  # ler/gravar JSON 
 import io   # buffer PNG 
 import qrcode  # gerar QR code 
+import os
+from fastapi import Header
+
+API_KEY = os.getenv("API_KEY", "")           # valor vem do Render
+API_KEY_HEADER = "X-API-KEY"                 # nome do header esperado
 
 app = FastAPI(title="AAS + DPP + View", version="0.3.0")  # app FastAPI 
 
@@ -86,17 +91,43 @@ def get_aas(id: str):
         raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")  # 
 
 @app.put("/aas/{id}/submodel/{name}")
-def update_submodel(id: str, name: str, body: dict = Body(...)):
+def update_submodel(
+    id: str,
+    name: str,
+    body: dict = Body(...),
+    x_api_key: str | None = Header(None, alias=API_KEY_HEADER),
+    request: Request = None,
+):
+    if x_api_key != API_KEY or not API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: missing or invalid API key")
+
     if id != "1":
-        raise HTTPException(status_code=404, detail="AAS não encontrado para este id (use 1 no POC).")  # 
+        raise HTTPException(status_code=404, detail="AAS não encontrado para este id (use 1 no POC).")
+
     try:
-        data = load_aas()  # 
+        data = load_aas()
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")  # 
-    data.setdefault("submodels", {})  # 
-    data["submodels"][name] = body  # 
-    save_aas(data)  # 
-    return {"status": "ok", "updatedSubmodel": name}  # 
+        raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")
+
+    data.setdefault("submodels", {})
+    data["submodels"][name] = body
+    save_aas(data)
+
+    # log simples
+    log_line = {
+        "ts": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "ip": request.client.host if request and request.client else None,
+        "id": id,
+        "submodel": name,
+    }
+    (HERE / "changes.log").write_text(
+        ((HERE / "changes.log").read_text(encoding="utf-8") if (HERE / "changes.log").exists() else "") +
+        json.dumps(log_line, ensure_ascii=False) + "\n",
+        encoding="utf-8"
+    )
+
+    return {"status": "ok", "updatedSubmodel": name}
+
 
 # =========================
 # DPP em tempo real (JSON)
