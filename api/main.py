@@ -16,6 +16,16 @@ API_KEY_HEADER = "X-API-KEY"
 
 app = FastAPI(title="AAS + DPP + View", version="0.3.0")  # app FastAPI 
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],     # simples para POC; depois restringir
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Caminhos de pastas relativas a este arquivo
 HERE = Path(__file__).resolve().parent  # api/ [2]
 AAS_FILE = HERE.parent / "aas" / "artifacts" / "aas_1.json"  # aas/artifacts/aas_1.json 
