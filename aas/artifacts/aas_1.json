@@ -1,0 +1,18 @@
+{
+"id": "1",
+"asset": {
+"name": "Produto Exemplo",
+"manufacturer": "MinhaEmpresa"
+},
+"submodels": {
+"nameplate": {
+"manufacturer": "MinhaEmpresa",
+"model": "X100",
+"serialNumber": "SN-001"
+},
+"technicalData": {
+"power": "100W",
+"weight": "2kg"
+}
+}
+}
