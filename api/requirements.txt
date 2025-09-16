@@ -4,3 +4,5 @@ uvicorn[standard]
 pydantic
 python-multipart
 qrcode[pil]
+Jinja2
+aiofiles
