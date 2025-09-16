@@ -1,0 +1,7 @@
+body { font-family: system-ui, Arial, sans-serif; margin: 24px; line-height: 1.4; }
+h1 { margin-bottom: 8px; }
+h2 { margin: 20px 0 8px; }
+pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow: auto; }
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; }
+section { margin-bottom: 20px; }
