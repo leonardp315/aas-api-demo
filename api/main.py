@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Body  # FastAPI básico [251]
 from fastapi.responses import JSONResponse, StreamingResponse  # respostas JSON e imagem [251]
 from pathlib import Path  # manipular caminhos de arquivos [251]
 from pydantic import BaseModel, Field  # modelos e validação [292]
-from typing import Optional, Dict, List  # tipos auxiliares [292]
+from typing import Any  # adicione
 import json  # ler/gravar JSON [251]
 import io  # buffer de bytes para PNG [251]
 import qrcode  # gerar QR code [251]
@@ -36,10 +36,10 @@ def save_aas(data: dict) -> None:
 # Modelos (DPP) [292]
 # -------------------------
 class DPP(BaseModel):
-    productId: str = Field(..., description="Identificador do produto")  # [292]
-    nameplate: Dict[str, str]  # [292]
-    technicalData: Dict[str, Optional[str]]  # [292]
-    evidences: List[str] = []  # [292]
+    productId: str
+    nameplate: dict[str, Any]          # antes: Dict[str, str]
+    technicalData: dict[str, Any]      # antes: Dict[str, Optional[str]]
+    evidences: list[str] = []
 
 def build_dpp_from_aas(aas: dict) -> DPP:
     nameplate = aas.get("submodels", {}).get("nameplate", {}) or {}  # [251]
