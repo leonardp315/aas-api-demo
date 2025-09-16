@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <title>DPP do Produto</title>
+  <link href="{{ url_for('static', path='/styles.css') }}" rel="stylesheet">
+</head>
+<body>
+  <h1>DPP do Produto {{ dpp.productId }}</h1>
+  <section>
+    <h2>Nameplate</h2>
+    <pre>{{ nameplate_pretty }}</pre>
+  </section>
+  <section>
+    <h2>Technical Data</h2>
+    <pre>{{ technical_pretty }}</pre>
+  </section>
+  <section>
+    <h2>QR para o DPP</h2>
+    <img src="{{ qrcode_url }}" alt="QR DPP" width="220">
+    <p><a href="{{ dpp_url }}" target="_blank">Abrir JSON do DPP</a></p>
+  </section>
+</body>
+</html>
