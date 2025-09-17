@@ -1,201 +1,314 @@
-from fastapi import FastAPI, HTTPException, Body, Request  # FastAPI e Request para templates [3]
-from fastapi.responses import JSONResponse, StreamingResponse  # JSON e imagem 
-from fastapi.staticfiles import StaticFiles  # servir /static [2]
-from fastapi.templating import Jinja2Templates  # renderizar templates Jinja2 [3]
-from pathlib import Path  # caminho de arquivos [2]
-from pydantic import BaseModel, Field  # modelos/validação [4]
-from typing import Any, Dict, List, Optional  # tipos auxiliares [4]
-import json  # ler/gravar JSON 
-import io   # buffer PNG 
-import qrcode  # gerar QR code 
+# api/main.py
 import os
-from fastapi import Header, Request
+import json
+import re
+from pathlib import Path
+from typing import Optional, Dict, Any
 
-API_KEY = os.getenv("API_KEY", "")
-API_KEY_HEADER = "X-API-KEY"
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
+from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field, ValidationError
+import qrcode
+from io import BytesIO
 
-app = FastAPI(title="AAS + DPP + View", version="0.3.0")  # app FastAPI 
+# -----------------------------------------------------------------------------
+# Configuração básica
+# -----------------------------------------------------------------------------
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = APP_DIR / "data"
+TEMPLATES_DIR = APP_DIR / "templates"
+STATIC_DIR = APP_DIR / "static"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-from fastapi.middleware.cors import CORSMiddleware
+# URL pública usada nas páginas e QR (ajuste após o deploy)
+PUBLIC_BASE = os.getenv("https://aas-api-demo.onrender.com/", "http://localhost:8000")
+API_KEY_BACKEND = os.getenv("@senha123", "dev-key-change")
+AAS_FILE = DATA_DIR / "aas_1.json"  # AAS do produto id=1 salvo localmente
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],     # simples para POC; depois restringir
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="AAS + DPP Demo API")
 
-# Caminhos de pastas relativas a este arquivo
-HERE = Path(__file__).resolve().parent  # api/ [2]
-AAS_FILE = HERE.parent / "aas" / "artifacts" / "aas_1.json"  # aas/artifacts/aas_1.json 
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# URL pública base da sua API (troque para a URL onrender do seu serviço)
-PUBLIC_BASE = "https://dashboard.render.com/"  # ex.: https://aas-api-demo.onrender.com 
+# -----------------------------------------------------------------------------
+# Modelos Pydantic para submodelos mínimos
+# -----------------------------------------------------------------------------
+class Nameplate(BaseModel):
+    manufacturer: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    serialNumber: str = Field(..., min_length=1)
 
-# Montar arquivos estáticos e templates
-app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")  # serve api/static em /static [2]
-templates = Jinja2Templates(directory=str(HERE / "templates"))  # templates Jinja em api/templates [3]
+class TechnicalData(BaseModel):
+    power: Optional[str] = None
+    weight: Optional[str] = None
 
-# =========================
-# Utilitários do AAS
-# =========================
-def load_aas() -> dict:
+class AASModel(BaseModel):
+    id: str
+    submodels: Dict[str, Dict[str, Any]]
+
+# -----------------------------------------------------------------------------
+# Utilidades de persistência simples em arquivo
+# -----------------------------------------------------------------------------
+def default_aas() -> AASModel:
+    return AASModel(
+        id="1",
+        submodels={
+            "nameplate": Nameplate(
+                manufacturer="Desconhecido",
+                model="Desconhecido",
+                serialNumber="SN-0000"
+            ).model_dump(),
+            "technicalData": TechnicalData().model_dump(),
+        },
+    )
+
+def load_aas() -> AASModel:
     if not AAS_FILE.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {AAS_FILE}")  # 
+        save_aas(default_aas())
     with open(AAS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)  # 
+        data = json.load(f)
+    try:
+        return AASModel(**data)
+    except ValidationError:
+        # Recria caso esteja corrompido
+        aas = default_aas()
+        save_aas(aas)
+        return aas
 
-def save_aas(data: dict) -> None:
-    AAS_FILE.parent.mkdir(parents=True, exist_ok=True)  # 
+def save_aas(aas: AASModel) -> None:
     with open(AAS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)  # 
+        json.dump(aas.model_dump(), f, ensure_ascii=False, indent=2)
 
-# =========================
-# Modelo do DPP
-# =========================
-class DPP(BaseModel):
-    productId: str = Field(..., description="Identificador do produto")  # [4]
-    # Flexível para não quebrar com valores não-string do AAS (POC)
-    nameplate: Dict[str, Any]  # antes poderia ser Dict[str, str] [4]
-    technicalData: Dict[str, Any]  # antes poderia ser Dict[str, Optional[str]] [4]
-    evidences: List[str] = []  # [4]
+# -----------------------------------------------------------------------------
+# Dependência de autenticação para rotas de escrita
+# -----------------------------------------------------------------------------
+def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
+    if API_KEY_BACKEND and x_api_key != API_KEY_BACKEND:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-KEY")
 
-def build_dpp_from_aas(aas: dict) -> DPP:
-    nameplate = aas.get("submodels", {}).get("nameplate", {}) or {}  # 
-    technical = aas.get("submodels", {}).get("technicalData", {}) or {}  # 
-    return DPP(
-        productId=str(aas.get("id", "1")),  # [4]
-        nameplate=nameplate,
-        technicalData=technical,
-        evidences=[],
-    )  # [4]
+# -----------------------------------------------------------------------------
+# Normalização leve de unidades (exemplo)
+# -----------------------------------------------------------------------------
+def normalize_units(tech: TechnicalData) -> TechnicalData:
+    p = tech.power
+    w = tech.weight
+    if p:
+        p = p.replace("Watt", "W").replace("watts", "W").replace("Watts", "W")
+        p = re.sub(r"\s+", " ", p).strip()
+    if w:
+        w = w.replace("kgs", "kg").replace("KG", "kg")
+        w = re.sub(r"\s+", " ", w).strip()
+    return TechnicalData(power=p, weight=w)
 
-# =========================
-# Endpoints principais
-# =========================
-@app.get("/")
-def root():
-    return {
-        "status": "running",
-        "endpoints": [
-            "/aas/1",
-            "/aas/1/submodel/nameplate (PUT)",
-            "/aas/1/submodel/technicalData (PUT)",
-            "/dpp/1",
-            "/view/dpp/1",
-            "/qrcode",
-            "/qrcode/docs",
-            "/docs",
-        ],
-    }  # 
+# -----------------------------------------------------------------------------
+# Rotas AAS
+# -----------------------------------------------------------------------------
+@app.get("/aas/{asset_id}", response_class=JSONResponse)
+def get_aas(asset_id: str):
+    aas = load_aas()
+    if aas.id != asset_id:
+        raise HTTPException(status_code=404, detail="AAS not found")
+    return aas.model_dump()
 
-@app.get("/aas/{id}")
-def get_aas(id: str):
-    if id != "1":
-        raise HTTPException(status_code=404, detail="AAS não encontrado para este id (use 1 no POC).")  # 
-    try:
-        data = load_aas()  # 
-        return JSONResponse(content=data)  # 
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")  # 
+@app.put("/aas/{asset_id}/submodel/{name}", dependencies=[Depends(require_api_key)])
+def put_submodel(asset_id: str, name: str, payload: Dict[str, Any]):
+    aas = load_aas()
+    if aas.id != asset_id:
+        raise HTTPException(status_code=404, detail="AAS not found")
+    # validação por submodelo
+    if name == "nameplate":
+        obj = Nameplate(**payload)
+        aas.submodels[name] = obj.model_dump()
+    elif name == "technicalData":
+        obj = TechnicalData(**payload)
+        obj = normalize_units(obj)
+        aas.submodels[name] = obj.model_dump()
+    else:
+        # permitir submodelos livres no POC, mantendo dicionário
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+        aas.submodels[name] = payload
+    save_aas(aas)
+    return {"ok": True, "submodel": name}
 
-@app.put("/aas/{id}/submodel/{name}")
-def update_submodel(
-    id: str,
-    name: str,
-    body: dict = Body(...),
-    x_api_key: str | None = Header(None, alias=API_KEY_HEADER),
-    request: Request = None,
-):
-    if x_api_key != API_KEY or not API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized: missing or invalid API key")
+# -----------------------------------------------------------------------------
+# Composição simples do DPP a partir do AAS
+# -----------------------------------------------------------------------------
+def build_dpp_from_aas(aas: AASModel) -> Dict[str, Any]:
+    nameplate = aas.submodels.get("nameplate", {})
+    tech = aas.submodels.get("technicalData", {})
+    dpp = {
+        "productId": aas.id,
+        "nameplate": {
+            "manufacturer": nameplate.get("manufacturer"),
+            "model": nameplate.get("model"),
+            "serialNumber": nameplate.get("serialNumber"),
+        },
+        "technicalData": {
+            "power": tech.get("power"),
+            "weight": tech.get("weight"),
+        },
+        "links": {
+            "aas": f"{PUBLIC_BASE}/aas/{aas.id}",
+            "self": f"{PUBLIC_BASE}/dpp/{aas.id}",
+        },
+        "meta": {
+            "schema": "DPP-minimal-v0",
+        },
+    }
+    return dpp
 
-    if id != "1":
-        raise HTTPException(status_code=404, detail="AAS não encontrado para este id (use 1 no POC).")
+@app.get("/dpp/{asset_id}", response_class=JSONResponse)
+def get_dpp(asset_id: str):
+    aas = load_aas()
+    if aas.id != asset_id:
+        raise HTTPException(status_code=404, detail="DPP not found")
+    return build_dpp_from_aas(aas)
 
-    try:
-        data = load_aas()
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")
-
-    data.setdefault("submodels", {})
-    data["submodels"][name] = body
-    save_aas(data)
-
-    return {"status": "ok", "updatedSubmodel": name}
-
-
-# =========================
-# DPP em tempo real (JSON)
-# =========================
-@app.get("/dpp/{id}", response_model=DPP)
-def get_dpp(id: str):
-    if id != "1":
-        raise HTTPException(status_code=404, detail="DPP não disponível para este id (use 1 no POC).")  # 
-    try:
-        aas = load_aas()  # 
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")  # 
-    dpp = build_dpp_from_aas(aas)  # [4]
-    return dpp  # 
-
-# =========================
-# Página HTML para visualizar o DPP
-# =========================
-@app.get("/view/dpp/{id}")
-def view_dpp(id: str, request: Request):
-    if id != "1":
-        raise HTTPException(status_code=404, detail="DPP não disponível para este id (use 1 no POC).")  # [3]
-    try:
-        aas = load_aas()  # 
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo AAS não encontrado.")  # 
-    dpp = build_dpp_from_aas(aas)  # [4]
-
-    # Preparar exibição “bonita”
-    nameplate_pretty = json.dumps(dpp.nameplate, ensure_ascii=False, indent=2)  # [3]
-    technical_pretty = json.dumps(dpp.technicalData, ensure_ascii=False, indent=2)  # [3]
-    dpp_url = f"{PUBLIC_BASE}/dpp/{id}"  # 
-    qrcode_url = f"{PUBLIC_BASE}/qrcode"  # 
-
+# -----------------------------------------------------------------------------
+# Páginas de visualização (Jinja2)
+# -----------------------------------------------------------------------------
+@app.get("/view/dpp/{asset_id}", response_class=HTMLResponse)
+def view_dpp(asset_id: str, request: Request):
+    aas = load_aas()
+    if aas.id != asset_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    dpp = build_dpp_from_aas(aas)
+    qrcode_url = f"{PUBLIC_BASE}/qrcode?target={PUBLIC_BASE}/dpp/{asset_id}"
     return templates.TemplateResponse(
-        "view.html",
+        "dpp.html",
         {
             "request": request,
-            "dpp": dpp.model_dump(),
-            "nameplate_pretty": nameplate_pretty,
-            "technical_pretty": technical_pretty,
-            "dpp_url": dpp_url,
+            "dpp": dpp,
+            "qrcode_url": qrcode_url,
+            "public_base": PUBLIC_BASE,
+        },
+    )
+
+@app.get("/view/label/{asset_id}", response_class=HTMLResponse)
+def view_label(asset_id: str, request: Request):
+    aas = load_aas()
+    if aas.id != asset_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    np = aas.submodels.get("nameplate", {})
+    qrcode_url = f"{PUBLIC_BASE}/qrcode?target={PUBLIC_BASE}/dpp/{asset_id}"
+    return templates.TemplateResponse(
+        "label.html",
+        {
+            "request": request,
+            "nameplate": np,
             "qrcode_url": qrcode_url,
         },
-    )  # [3]
+    )
 
-# =========================
-# QRCodes
-# =========================
+# -----------------------------------------------------------------------------
+# QR code
+# -----------------------------------------------------------------------------
 @app.get("/qrcode")
-def get_qrcode():
-    """QR que aponta para /dpp/1"""  # 
-    dpp_url = f"{PUBLIC_BASE}/dpp/1"  # 
-    qr = qrcode.QRCode(version=1, box_size=10, border=2)  # 
-    qr.add_data(dpp_url)  # 
-    qr.make(fit=True)  # 
-    img = qr.make_image(fill_color="black", back_color="white")  # 
-    buf = io.BytesIO()  # 
-    img.save(buf, format="PNG")  # 
-    buf.seek(0)  # 
-    return StreamingResponse(buf, media_type="image/png")  # 
+def get_qrcode(target: str):
+    if not target or not target.startswith("http"):
+        raise HTTPException(status_code=400, detail="Invalid target")
+    img = qrcode.make(target)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png")
 
-@app.get("/qrcode/docs")
-def get_qrcode_docs():
-    """QR para a página Swagger (/docs)"""  # 
-    docs_url = f"{PUBLIC_BASE}/docs"  # 
-    qr = qrcode.QRCode(version=1, box_size=10, border=2)  # 
-    qr.add_data(docs_url)  # 
-    qr.make(fit=True)  # 
-    img = qr.make_image(fill_color="black", back_color="white")  # 
-    buf = io.BytesIO()  # 
-    img.save(buf, format="PNG")  # 
-    buf.seek(0)  # 
-    return StreamingResponse(buf, media_type="image/png")  # 
+# -----------------------------------------------------------------------------
+# Bootstrap de templates básicos se não existirem
+# -----------------------------------------------------------------------------
+DPP_HTML = """<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><title>DPP</title>
+<link rel="stylesheet" href="{{ public_base }}/static/style.css">
+<style>
+body { font-family: Arial, sans-serif; margin: 24px; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; max-width: 720px; }
+h1 { margin: 0 0 12px 0; font-size: 20px; }
+h2 { font-size: 16px; margin-top: 18px; }
+.row { display: flex; gap: 24px; align-items: flex-start; }
+.meta { color: #666; font-size: 12px; margin-top: 12px; }
+.kv { margin: 4px 0; }
+.kv span { color: #333; }
+.qr { margin-top: 12px; }
+</style>
+</head><body>
+<div class="card">
+  <h1>Digital Product Passport — ID {{ dpp.productId }}</h1>
+  <div class="row">
+    <div style="flex:1">
+      <h2>Nameplate</h2>
+      <div class="kv">Manufacturer: <span>{{ dpp.nameplate.manufacturer }}</span></div>
+      <div class="kv">Model: <span>{{ dpp.nameplate.model }}</span></div>
+      <div class="kv">Serial: <span>{{ dpp.nameplate.serialNumber }}</span></div>
+
+      <h2>Technical Data</h2>
+      <div class="kv">Power: <span>{{ dpp.technicalData.power }}</span></div>
+      <div class="kv">Weight: <span>{{ dpp.technicalData.weight }}</span></div>
+
+      <h2>Links</h2>
+      <div class="kv"><a href="{{ dpp.links.aas }}" target="_blank">AAS JSON</a></div>
+      <div class="kv"><a href="{{ dpp.links.self }}" target="_blank">DPP JSON</a></div>
+
+      <div class="meta">Schema: {{ dpp.meta.schema }}</div>
+    </div>
+    <div class="qr">
+      <img src="{{ qrcode_url }}" width="180" />
+    </div>
+  </div>
+</div>
+</body></html>
+"""
+
+LABEL_HTML = """<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><title>Etiqueta</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 24px; }
+.big { font-size: 20px; margin: 6px 0; }
+.qr { margin-top: 12px; }
+</style>
+</head><body>
+<div class="big">{{ nameplate.get('manufacturer', '') }}</div>
+<div class="big">{{ nameplate.get('model', '') }}</div>
+<div>SN: {{ nameplate.get('serialNumber', '') }}</div>
+<div class="qr"><img src="{{ qrcode_url }}" width="220" /></div>
+</body></html>
+"""
+
+STYLE_CSS = """body { background: #fff; } a { color: #0b5bd3; text-decoration: none; } a:hover { text-decoration: underline; }"""
+
+def ensure_templates():
+    dpp_path = TEMPLATES_DIR / "dpp.html"
+    label_path = TEMPLATES_DIR / "label.html"
+    css_path = STATIC_DIR / "style.css"
+    if not dpp_path.exists():
+        dpp_path.write_text(DPP_HTML, encoding="utf-8")
+    if not label_path.exists():
+        label_path.write_text(LABEL_HTML, encoding="utf-8")
+    if not css_path.exists():
+        css_path.write_text(STYLE_CSS, encoding="utf-8")
+
+ensure_templates()
+
+# -----------------------------------------------------------------------------
+# Raiz
+# -----------------------------------------------------------------------------
+@app.get("/", response_class=JSONResponse)
+def root():
+    return {
+        "service": "AAS + DPP Demo",
+        "endpoints": [
+            "/aas/1",
+            "/aas/1/submodel/nameplate [PUT]",
+            "/aas/1/submodel/technicalData [PUT]",
+            "/dpp/1",
+            "/view/dpp/1",
+            "/view/label/1",
+            "/qrcode?target=<url>",
+        ],
+        "public_base": PUBLIC_BASE,
+    }
